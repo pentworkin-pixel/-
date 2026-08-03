@@ -2,72 +2,98 @@
  * 네이버 쇼핑 모바일 검색(msearch.shopping.naver.com) 결과에서
  * 광고 상품을 제외한 순위를 조회해 스프레드시트에 기록하는 Apps Script입니다.
  *
+ * 실제 운영 중인 시트("시트1")의 구조에 맞춰져 있습니다:
+ *   A 상품명(참고) · B 리워드명(참고) · C 갯수(참고) · D 판매처명(참고)
+ *   E 상품링크(참고) · F 순위 변동(이 스크립트가 건드리지 않음)
+ *   G 순위 조회 키워드 · H 상품 MID · I 가격비교 MID · J 월검색량(참고)
+ *   K열부터: 조회할 때마다 왼쪽에 새 열이 하나씩 삽입되고, 헤더에 조회 시각,
+ *            각 행에는 그 시점의 순위(광고 제외) 또는 999(못 찾음/차단 등)가 채워짐
+ *
  * 이 파일의 모든 전역 이름은 naverRank / NAVER_RANK 접두사를 쓰므로
  * 기존 코드(광고 종료 캘린더 동기화 등)와 충돌하지 않습니다.
  *
  * ⚠️ 중요한 한계
  * msearch.shopping.naver.com은 데이터센터 IP(포함: Google Apps Script 서버)에서의
- * 접근을 비정상 트래픽으로 판단해 HTTP 418로 차단하는 경우가 있습니다.
- * 이 스크립트는 실행할 때마다 최신 접속 가능 여부를 그대로 반영합니다 — 차단되면
- * 결과 칸에 그 사실을 적어줄 뿐, 우회하지는 않습니다. naverRankDebugFetch로
- * 먼저 접속 상태를 확인하세요.
+ * 접근을 비정상 트래픽으로 판단해 HTTP 418로 차단하는 경우가 있습니다. 이 스크립트는
+ * 이를 우회하지 않고, 차단되거나 상품을 못 찾으면 그 행에 999를 적을 뿐입니다.
+ * naverRankDebugFetch로 먼저 접속 상태를 확인하세요.
  */
 
 var NAVER_RANK_CONFIG = {
-  SHEET_NAME: '네이버쇼핑 순위조회',
+  SHEET_NAME: '시트1',
   TIMEZONE: 'Asia/Seoul',
-  HEADER_ROWS: 1,
-  COL_KEYWORD: 1,          // A: 검색 키워드
-  COL_MATCH_NAME: 2,       // B: 상품명 매칭 문자열 (부분 일치, 필수)
-  COL_MATCH_MALL: 3,       // C: 판매처 매칭 문자열 (부분 일치, 선택)
-  COL_RESULT_RANK: 4,      // D: 순위 (광고 제외)
-  COL_RESULT_NAME: 5,      // E: 실제로 매칭된 상품명
-  COL_RESULT_MALL: 6,      // F: 실제로 매칭된 판매처
-  COL_RESULT_CHECKED_AT: 7, // G: 조회 시각
-  COL_RESULT_NOTE: 8,      // H: 비고 (실패/미노출 사유)
+  HEADER_ROW: 3,           // 헤더가 있는 행
+  FIRST_DATA_ROW: 4,       // 상품 데이터가 시작하는 행
+  COL_KEYWORD: 7,          // G: 순위 조회 키워드
+  COL_PRODUCT_MID: 8,      // H: 상품 MID
+  COL_COMPARE_MID: 9,      // I: 가격비교 MID
+  FIRST_HISTORY_COL: 11,   // K: 조회 결과 열이 매번 삽입되는 위치
+  NOT_FOUND_RANK: 999,     // 못 찾음/차단/오류일 때 기록할 값 (시트의 기존 관례)
   MAX_SCAN: 200,           // 한 번의 응답에서 순위 계산에 사용할 최대 상품 수
-  REQUEST_DELAY_MS: 1200,  // 키워드 간 대기 시간 (과도한 요청으로 인한 차단 완화)
+  REQUEST_DELAY_MS: 1200,  // 서로 다른 키워드 요청 사이 대기 시간
 };
 
-/** 시트의 모든 행을 순회하며 순위를 조회하고 결과를 기록합니다. */
-function naverRankCheckAll() {
+/**
+ * 모든 상품 행의 순위를 조회해 맨 왼쪽(K열)에 새 결과 열을 삽입합니다.
+ * 오전 11시 / 오후 5시에 자동 실행되도록 하려면 naverRankInstall을 한 번 실행하세요.
+ */
+function naverRankUpdateAll() {
   const sheet = naverRankGetSheet_();
   const lastRow = sheet.getLastRow();
-  if (lastRow <= NAVER_RANK_CONFIG.HEADER_ROWS) {
-    Logger.log('조회할 행이 없습니다.');
+  const firstDataRow = NAVER_RANK_CONFIG.FIRST_DATA_ROW;
+  if (lastRow < firstDataRow) {
+    Logger.log('조회할 상품 행이 없습니다.');
     return;
   }
 
-  const startRow = NAVER_RANK_CONFIG.HEADER_ROWS + 1;
-  const numRows = lastRow - NAVER_RANK_CONFIG.HEADER_ROWS;
-  const range = sheet.getRange(startRow, 1, numRows, NAVER_RANK_CONFIG.COL_RESULT_NOTE);
-  const values = range.getValues();
+  const numRows = lastRow - firstDataRow + 1;
+  const idValues = sheet.getRange(firstDataRow, NAVER_RANK_CONFIG.COL_KEYWORD, numRows, 3).getValues();
 
-  for (let i = 0; i < values.length; i++) {
-    const keyword = String(values[i][NAVER_RANK_CONFIG.COL_KEYWORD - 1] || '').trim();
-    const matchName = String(values[i][NAVER_RANK_CONFIG.COL_MATCH_NAME - 1] || '').trim();
-    const matchMall = String(values[i][NAVER_RANK_CONFIG.COL_MATCH_MALL - 1] || '').trim();
-    if (!keyword || !matchName) continue;
+  const cache = {}; // 키워드 → naverRankFetchRanking_ 결과 (같은 키워드 중복 요청 방지)
+  const ranks = new Array(numRows);
+  const keywordsFetchedThisRun = [];
 
-    const result = naverRankCheckOne_(keyword, matchName, matchMall);
-    values[i][NAVER_RANK_CONFIG.COL_RESULT_RANK - 1] = result.rank;
-    values[i][NAVER_RANK_CONFIG.COL_RESULT_NAME - 1] = result.name;
-    values[i][NAVER_RANK_CONFIG.COL_RESULT_MALL - 1] = result.mallName;
-    values[i][NAVER_RANK_CONFIG.COL_RESULT_CHECKED_AT - 1] = naverRankNow_();
-    values[i][NAVER_RANK_CONFIG.COL_RESULT_NOTE - 1] = result.note;
+  for (let i = 0; i < numRows; i++) {
+    const keyword = String(idValues[i][0] || '').trim();
+    const mid = idValues[i][1];
+    const compareMid = idValues[i][2];
 
-    // 키워드마다 요청 사이에 텀을 둬 짧은 시간에 몰린 요청으로 보이지 않게 한다.
-    if (i < values.length - 1) Utilities.sleep(NAVER_RANK_CONFIG.REQUEST_DELAY_MS);
+    if (!keyword || !mid) {
+      ranks[i] = '';
+      continue;
+    }
+
+    if (!(keyword in cache)) {
+      if (keywordsFetchedThisRun.length > 0) Utilities.sleep(NAVER_RANK_CONFIG.REQUEST_DELAY_MS);
+      cache[keyword] = naverRankFetchRanking_(keyword);
+      keywordsFetchedThisRun.push(keyword);
+    }
+
+    const fetched = cache[keyword];
+    if (!fetched.ok) {
+      ranks[i] = NAVER_RANK_CONFIG.NOT_FOUND_RANK;
+      continue;
+    }
+
+    const items = fetched.items.slice(0, NAVER_RANK_CONFIG.MAX_SCAN);
+    const found = naverRankFindByMid_(items, mid, compareMid);
+    ranks[i] = found ? found.rank : NAVER_RANK_CONFIG.NOT_FOUND_RANK;
   }
 
-  range.setValues(values);
+  naverRankInsertResultColumn_(sheet, firstDataRow, ranks);
+  Logger.log(`완료: 키워드 ${keywordsFetchedThisRun.length}건 조회, 상품 ${numRows}행 기록`);
 }
 
-/** 시트 없이 키워드 하나만 바로 확인하고 싶을 때 스크립트 편집기에서 직접 실행합니다. */
-function naverRankCheckKeyword(keyword, matchName, matchMall) {
-  const result = naverRankCheckOne_(keyword, matchName, matchMall || '');
-  Logger.log(JSON.stringify(result, null, 2));
-  return result;
+/** 새 결과 열을 K열 앞에 삽입하고, 헤더(조회 시각)와 순위 값을 채운다. */
+function naverRankInsertResultColumn_(sheet, firstDataRow, ranks) {
+  const col = NAVER_RANK_CONFIG.FIRST_HISTORY_COL;
+  sheet.insertColumnBefore(col);
+
+  const headerCell = sheet.getRange(NAVER_RANK_CONFIG.HEADER_ROW, col);
+  headerCell.setNumberFormat('yy-mm-dd h:mm');
+  headerCell.setValue(new Date());
+
+  sheet.getRange(firstDataRow, col, ranks.length, 1).setValues(ranks.map((r) => [r]));
 }
 
 /** 접속 차단 여부·페이지 구조 변화를 진단하기 위한 디버그용 함수. */
@@ -80,27 +106,25 @@ function naverRankDebugFetch(keyword) {
   }
   Logger.log(`✅ 광고 제외 상품 ${fetched.items.length}개 확인됨 (키워드: ${q})`);
   fetched.items.slice(0, 10).forEach((it) => {
-    Logger.log(`${it.rank}위 | ${it.name} | ${it.mallName}`);
+    Logger.log(`${it.rank}위 | ${it.name} | ${it.mallName} | MID:${it.productId}`);
   });
   return fetched;
 }
 
-/** 키워드 하나에 대해 매칭되는 상품의 순위를 계산합니다. */
-function naverRankCheckOne_(keyword, matchName, matchMall) {
+/** 시트 없이 키워드+MID 하나만 바로 확인하고 싶을 때 스크립트 편집기에서 직접 실행합니다. */
+function naverRankCheckKeywordMid(keyword, mid, compareMid) {
   const fetched = naverRankFetchRanking_(keyword);
   if (!fetched.ok) {
-    return { rank: '', name: '', mallName: '', note: fetched.note };
+    Logger.log('❌ 조회 실패: ' + fetched.note);
+    return { rank: NAVER_RANK_CONFIG.NOT_FOUND_RANK, note: fetched.note };
   }
-
   const items = fetched.items.slice(0, NAVER_RANK_CONFIG.MAX_SCAN);
-  const found = naverRankFindMatch_(items, matchName, matchMall);
-  if (!found) {
-    return {
-      rank: '', name: '', mallName: '',
-      note: `미노출 (광고 제외 상위 ${items.length}개 안에서 못 찾음)`,
-    };
-  }
-  return { rank: found.rank, name: found.name, mallName: found.mallName, note: '' };
+  const found = naverRankFindByMid_(items, mid, compareMid);
+  const result = found
+    ? { rank: found.rank, name: found.name, mallName: found.mallName }
+    : { rank: NAVER_RANK_CONFIG.NOT_FOUND_RANK, note: `미노출 (광고 제외 상위 ${items.length}개 안에서 못 찾음)` };
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 /**
@@ -235,15 +259,19 @@ function naverRankIsAdItem_(item) {
   return false;
 }
 
-/** 순위 목록에서 상품명(+선택적으로 판매처)이 매칭되는 첫 항목을 찾는다. */
-function naverRankFindMatch_(items, matchName, matchMall) {
-  const nameLower = matchName.toLowerCase();
-  const mallLower = matchMall ? matchMall.toLowerCase() : '';
+/**
+ * 순위 목록에서 상품 MID 또는 가격비교 MID가 일치하는 첫 항목을 찾는다.
+ * 검색 결과 카드가 개별 상품 MID 대신 가격비교 MID로 노출되는 경우가 있어 둘 다 검사한다.
+ */
+function naverRankFindByMid_(items, mid, compareMid) {
+  const midStr = mid !== '' && mid !== null && mid !== undefined ? String(mid) : '';
+  const compareMidStr = compareMid !== '' && compareMid !== null && compareMid !== undefined ? String(compareMid) : '';
 
   for (const item of items) {
-    if (!item.name || item.name.toLowerCase().indexOf(nameLower) === -1) continue;
-    if (mallLower && (item.mallName || '').toLowerCase().indexOf(mallLower) === -1) continue;
-    return item;
+    const itemId = String(item.productId || '');
+    if (!itemId) continue;
+    if (midStr && itemId === midStr) return item;
+    if (compareMidStr && itemId === compareMidStr) return item;
   }
   return null;
 }
@@ -278,6 +306,43 @@ function naverRankGetSheet_() {
   return sheet;
 }
 
-function naverRankNow_() {
-  return Utilities.formatDate(new Date(), NAVER_RANK_CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+/* ── 자동 실행(트리거) 설치 ───────────────────────────────────────────────── */
+
+/** 매일 오전 11시 / 오후 5시(Asia/Seoul)에 naverRankUpdateAll이 자동 실행되도록 설치합니다. */
+function naverRankInstall() {
+  const removed = naverRankRemoveTriggers_();
+  ScriptApp.newTrigger('naverRankUpdateAll').timeBased()
+    .atHour(11).everyDays(1).inTimezone(NAVER_RANK_CONFIG.TIMEZONE).create();
+  ScriptApp.newTrigger('naverRankUpdateAll').timeBased()
+    .atHour(17).everyDays(1).inTimezone(NAVER_RANK_CONFIG.TIMEZONE).create();
+
+  const triggers = naverRankListTriggers_();
+  Logger.log('=== 네이버 쇼핑 순위 조회 설치 완료 ===');
+  Logger.log(`기존 트리거 정리: ${removed}개 삭제`);
+  Logger.log(`생성된 트리거 수: ${triggers.length}개 (매일 오전 11시 전후, 오후 5시 전후)`);
+}
+
+/** 등록된 트리거가 정확히 2개(11시/17시)인지 확인합니다. */
+function naverRankVerifyTriggers() {
+  const triggers = naverRankListTriggers_();
+  Logger.log(`현재 등록된 naverRankUpdateAll 트리거: ${triggers.length}개`);
+  if (triggers.length !== 2) {
+    Logger.log('⚠️ 2개가 아닙니다. naverRankInstall을 다시 실행하세요.');
+  }
+}
+
+/** 자동 실행을 멈춥니다. 시트에 이미 기록된 순위 이력은 그대로 남습니다. */
+function naverRankUninstall() {
+  const removed = naverRankRemoveTriggers_();
+  Logger.log(`트리거 ${removed}개 삭제 완료`);
+}
+
+function naverRankListTriggers_() {
+  return ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === 'naverRankUpdateAll');
+}
+
+function naverRankRemoveTriggers_() {
+  const triggers = naverRankListTriggers_();
+  triggers.forEach((t) => ScriptApp.deleteTrigger(t));
+  return triggers.length;
 }
