@@ -43,7 +43,7 @@ var RANK_ANALYSIS_CONFIG = {
   PERIODS: [1, 3, 7],           // 기준일 대비 며칠 전과 비교할지
 
   // 열 자동 감지용 헤더 패턴 (정규식). 실제 헤더가 달라도 이 패턴으로 찾아낸다.
-  PROGRAM_HEADER_PATTERN: /프로그램/,
+  PROGRAM_HEADER_PATTERN: /프로그램|리워드명/,
   PROGRAM_COL_FALLBACK: 5,      // 못 찾으면 E열 (프로그램 동기화.gs 가 쓰는 열)
   DATE_HEADER_PATTERN: /날짜|일자|date|업데이트/i,
   RANK_HEADER_PATTERN: /순위|rank/i,
@@ -68,8 +68,15 @@ var RANK_ANALYSIS_CONFIG = {
   // ── 값 해석 ─────────────────────────────────────────────────────────────
   // 순위 칸이 이 값들이면 "순위 없음"으로 보고 숫자 순위와 섞어 계산하지 않는다.
   NO_RANK_TOKENS: ['-', '–', '—', 'x', 'X', 'n/a', 'na', '없음', '미노출',
-                   '순위없음', '순위 없음', '노출없음', '검색안됨', '?'],
+                   '순위없음', '순위 없음', '노출없음', '검색안됨', '확인불가', '확인 불가', '?'],
   MAX_VALID_RANK: 100000,       // 이보다 큰 값은 순위로 보지 않는다
+
+  // 이 시트는 "1000위 밖" 등 확인 불가일 때 빈칸/텍스트가 아니라 특정 숫자로
+  // 채우는 경우가 있다(관측된 값: 999가 아주 여러 항목·여러 날짜에 걸쳐 반복됨 —
+  // 실제 999위라기보다 "1000위 밖(측정 상한)"일 가능성이 있다).
+  // 여기 채운 숫자는 진짜 순위가 아니라 "순위 없음"으로 처리된다.
+  // 999가 실제로 정상적인 순위값이라면 이 배열을 비워두면 된다.
+  RANK_CAP_VALUES: [],   // 예: [999] 로 채우면 999를 순위 없음으로 처리
 
   // E열이 "리뷰 3개, 트래픽 2개" 처럼 여러 프로그램을 담고 있을 때 쪼개서
   // 각 프로그램에 항목을 귀속시킨다. false 면 문자열 전체를 하나의 프로그램명으로 본다.
@@ -331,10 +338,24 @@ function rankAnalysisReadSource_() {
  * 날짜로 해석되는 머리글이 2개 이상이면 가로형으로 본다.
  */
 function rankAnalysisDetectColumns_(header, rows, cfg) {
-  var dateCols = [];
+  // 하루에 여러 번(시간대별로) 체크하는 시트는 같은 날짜의 열이 여럿이다
+  // (예: "26-09-04 16:12", "26-09-04 14:31"). 그런 열들 중 그날 가장 늦은
+  // 시각 하나만 그 날짜의 대표값으로 쓴다 — "그날의 최신 스냅샷"이 기준일이 된다.
+  var dateBest = {};   // dateKey → { col, score }
   for (var c = 1; c <= header.length; c++) {
+    var text = rankAnalysisTrim_(header[c - 1]);
     var key = rankAnalysisParseDate_(header[c - 1], cfg);
-    if (key) dateCols.push({ col: c, dateKey: key });
+    if (!key) continue;
+    var score = rankAnalysisHeaderTimeScore_(text);
+    if (!dateBest[key] || score > dateBest[key].score) {
+      dateBest[key] = { col: c, score: score };
+    }
+  }
+  var dateCols = [];
+  for (var dk in dateBest) {
+    if (Object.prototype.hasOwnProperty.call(dateBest, dk)) {
+      dateCols.push({ col: dateBest[dk].col, dateKey: dk });
+    }
   }
   dateCols.sort(function (a, b) { return a.dateKey < b.dateKey ? -1 : (a.dateKey > b.dateKey ? 1 : 0); });
 
@@ -405,6 +426,20 @@ function rankAnalysisFindHeader_(header, pattern, exclude) {
 function rankAnalysisHasCol_(dateCols, col) {
   for (var i = 0; i < dateCols.length; i++) if (dateCols[i].col === col) return true;
   return false;
+}
+
+/**
+ * 헤더 문자열에서 "시:분" 을 찾아 자정 기준 분(分)으로 돌려준다. 없으면 -1.
+ * 같은 날짜의 열이 여럿일 때 어느 것이 "그날 가장 늦은 시각"인지 비교하는 데 쓴다.
+ * 시각이 없는 열끼리는 먼저 나온(왼쪽) 열을 우선한다 — 이 시트들은 보통
+ * 왼쪽일수록 더 최근이기 때문이다.
+ */
+function rankAnalysisHeaderTimeScore_(text) {
+  var m = /(\d{1,2}):(\d{2})/.exec(text);
+  if (!m) return -1;
+  var h = Number(m[1]), mi = Number(m[2]);
+  if (h > 23 || mi > 59) return -1;
+  return h * 60 + mi;
 }
 
 /**
@@ -512,6 +547,9 @@ function rankAnalysisParseRank_(value, cfg) {
     if (!isFinite(value) || value <= 0 || value > cfg.MAX_VALID_RANK) {
       return { rank: null, hasRank: false };
     }
+    if (cfg.RANK_CAP_VALUES && cfg.RANK_CAP_VALUES.indexOf(value) >= 0) {
+      return { rank: null, hasRank: false };
+    }
     return { rank: value, hasRank: true };
   }
 
@@ -531,6 +569,7 @@ function rankAnalysisParseRank_(value, cfg) {
 
   var n = Number(cleaned);
   if (!isFinite(n) || n <= 0 || n > cfg.MAX_VALID_RANK) return { rank: null, hasRank: false };
+  if (cfg.RANK_CAP_VALUES && cfg.RANK_CAP_VALUES.indexOf(n) >= 0) return { rank: null, hasRank: false };
   return { rank: n, hasRank: true };
 }
 

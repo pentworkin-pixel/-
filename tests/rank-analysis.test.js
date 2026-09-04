@@ -132,8 +132,8 @@ assertDeep(P('리뷰/트래픽'), ['리뷰', '트래픽'], '슬래시 구분자'
 /* ═══ 6. 열 감지 ═════════════════════════════════════════════════════════ */
 
 {
-  // 가로형: 날짜가 열 머리글 (실제 순위추적 시트 형태)
-  const header = ['메모1', '리워드명', '판매처명', '상품링크', '프로그램',
+  // 가로형: 날짜가 열 머리글 (원 헤더에 "프로그램"이라는 단어가 그대로 있는 경우)
+  const header = ['메모1', '리워드', '판매처명', '상품링크', '프로그램',
                   '전일 비교', '순위 조회 키워드', '상품 MID', '가격비교 MID',
                   '26-08-20', '26-08-19', '26-08-17', '26-08-13'];
   const det = gs.rankAnalysisDetectColumns_(header, [], cfg);
@@ -211,6 +211,56 @@ assertDeep(P('리뷰/트래픽'), ['리뷰', '트래픽'], '슬래시 구분자'
   const header = ['이것', '저것', '그것'];
   assertThrows(() => gs.rankAnalysisDetectColumns_(header, [], cfg),
                '날짜·순위 열을 못 찾으면 명확한 오류를 던진다');
+}
+
+/* ── 실제 B시트(6행 헤더) 구조 — 하루에 여러 번 체크하는 봇 생성 시트 ─────── */
+
+// D=메모1, E=리워드명/갯수, F=판매처명, G=상품링크, H=N개전, I=전일비교, J=키워드,
+// K=상품 MID, L=가격비교 MID, M~ = 타임스탬프("yy-MM-dd HH:mm")
+const REAL_HEADER = ['상품명', '재고', '상품명2', '메모1', '리워드명 / 갯수', '판매처명',
+                     '상품링크', '4개전', '전일 비교 순위(자유 입력)', '순위 조회 키워드',
+                     '상품 MID', '가격비교 MID',
+                     '26-09-04 16:12', '26-09-04 14:31', '26-09-03 23:36', '26-08-20 08:14'];
+
+{
+  const det = gs.rankAnalysisDetectColumns_(REAL_HEADER, [], cfg);
+  assertEqual(det.layout, 'wide', '실제 B시트도 가로형으로 인식');
+  assertEqual(det.programCol, 5, '"리워드명 / 갯수" 헤더로 E열을 프로그램 열로 잡는다');
+  assertDeep(det.keyCols, [11, 10], '고유키 = 상품 MID(K) + 순위 조회 키워드(J)');
+  // "4개전"/"전일 비교 순위"는 순위 열도 날짜 열도 아니어야 한다
+  assertEqual(gs.rankAnalysisParseDate_(REAL_HEADER[7], cfg), null, '"4개전"은 날짜가 아니다');
+}
+
+{
+  // 같은 날짜(26-09-04)에 열이 2개(16:12, 14:31) — 더 늦은 시각(16:12) 하나만 대표로 쓴다
+  const det = gs.rankAnalysisDetectColumns_(REAL_HEADER, [], cfg);
+  const sep04 = det.dateCols.filter((d) => d.dateKey === '2026-09-04');
+  assertEqual(sep04.length, 1, '같은 날짜 열은 하나로 합쳐진다 (중복으로 세지 않음)');
+  assertEqual(sep04[0].col, 13, '그날 더 늦은 시각(16:12, M열)이 대표로 선택된다');
+  assertEqual(det.dateCols.length, 3, '9/4·9/3·8/20 세 날짜만 남는다 (14:31 열은 흡수됨)');
+}
+
+{
+  // 시:분 스코어 비교
+  assertEqual(gs.rankAnalysisHeaderTimeScore_('26-09-04 16:12'), 16 * 60 + 12, '16:12 → 972분');
+  assertEqual(gs.rankAnalysisHeaderTimeScore_('26-09-04 14:31'), 14 * 60 + 31, '14:31 → 871분');
+  assertEqual(gs.rankAnalysisHeaderTimeScore_('26-09-04'), -1, '시각이 없으면 -1');
+  assertEqual(gs.rankAnalysisHeaderTimeScore_('26-09-04 25:99'), -1, '말이 안 되는 시각은 무시');
+}
+
+/* ── 999 같은 상한값을 순위 없음으로 취급할 수 있는지 (기본은 끔) ────────── */
+
+{
+  assertEqual(gs.rankAnalysisParseRank_(999, cfg).hasRank, true,
+              '기본 설정(RANK_CAP_VALUES 비어 있음)에서는 999도 그냥 순위로 본다');
+
+  const capped = Object.assign({}, cfg, { RANK_CAP_VALUES: [999] });
+  assertEqual(gs.rankAnalysisParseRank_(999, capped).hasRank, false,
+              'RANK_CAP_VALUES=[999] 로 설정하면 999는 순위 없음으로 처리된다');
+  assertEqual(gs.rankAnalysisParseRank_('999', capped).hasRank, false,
+              '문자열 "999" 도 동일하게 처리된다');
+  assertEqual(gs.rankAnalysisParseRank_(998, capped).hasRank, true,
+              '998처럼 상한에 안 걸리는 값은 그대로 순위로 본다');
 }
 
 {
