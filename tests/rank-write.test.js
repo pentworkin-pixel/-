@@ -150,6 +150,9 @@ function setup() {
   const gs = load({
     SpreadsheetApp: fakeSpreadsheetApp({ [A_ID]: aSs, [B_ID]: bSs })
   });
+  // 이 파일의 픽스처는 단순화를 위해 헤더를 1행에 둔다. 실제 B시트(헤더 6행,
+  // 999 상한값)에 대한 end-to-end 검증은 아래 "실제 B시트 레이아웃" 절 참고.
+  gs.RANK_ANALYSIS_CONFIG.HEADER_ROW = 1;
 
   return { gs, aSs, bSs, bSheet, userSheet, calendarSheet };
 }
@@ -237,6 +240,7 @@ function setup() {
   const aSs = fakeSpreadsheet(A_ID, '김승환 현황', []);
   const bSs = fakeSpreadsheet(B_ID, '순위추적', [bSheet]);
   const gs = load({ SpreadsheetApp: fakeSpreadsheetApp({ [A_ID]: aSs, [B_ID]: bSs }) });
+  gs.RANK_ANALYSIS_CONFIG.HEADER_ROW = 1;   // 이 픽스처는 헤더가 1행
 
   const out = gs.updateProgramRankingAnalysis();
   assertEqual(out.indexOf('1일 전 비교일: 데이터 없음') >= 0, true,
@@ -257,11 +261,68 @@ function setup() {
   const aSs = fakeSpreadsheet(A_ID, '김승환 현황', []);
   const bSs = fakeSpreadsheet(B_ID, '순위추적', [bSheet]);
   const gs = load({ SpreadsheetApp: fakeSpreadsheetApp({ [A_ID]: aSs, [B_ID]: bSs }) });
+  gs.RANK_ANALYSIS_CONFIG.HEADER_ROW = 1;   // 이 픽스처는 헤더가 1행
 
   let threw = false;
-  try { gs.updateProgramRankingAnalysis(); } catch (e) { threw = true; }
+  let message = '';
+  try { gs.updateProgramRankingAnalysis(); } catch (e) { threw = true; message = e.message; }
   assertEqual(threw, true, '날짜 열을 못 찾으면 오류를 던진다');
+  assertEqual(message.indexOf('필수 열을 찾지 못했습니다') >= 0, true,
+              '실제로 "날짜 열 못 찾음" 오류인지 확인 (다른 이유로 던진 게 아님)');
   assertDeep(aSs.inserted, [], '실패했으면 분석 시트를 만들지 않는다');
+}
+
+/* ═══ 실제 B시트 레이아웃 — 기본 설정 그대로 end-to-end 검증 ═══════════════
+ * 헤더 6행(1~5행은 봇 안내문), "리워드명 / 갯수" 프로그램 열, 하루 여러 체크
+ * (같은 날짜에 열 여러 개), 999 상한값 — 실제 배포될 기본 설정(RANK_ANALYSIS_CONFIG)을
+ * 그대로 써서 검증한다. cfg 를 손으로 바꾸지 않는다.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+{
+  var pad = (n) => new Array(n).fill('');
+  const realHeader = ['상품명', 'b', 'c', '메모1', '리워드명 / 갯수', '판매처명', '상품링크',
+                      '4개전', '전일 비교 순위(자유 입력)', '순위 조회 키워드',
+                      '상품 MID', '가격비교 MID',
+                      '26-09-04 16:12', '26-09-04 14:31', '26-09-03 23:36', '26-08-28 08:14'];
+  // D=메모1(4) E=프로그램(5) ... J=키워드(10) K=MID(11) ... M~P=날짜(13~16)
+  function realRow(name, mid, keyword, m, n, o, p) {
+    const row = pad(16);
+    row[3] = '메모'; row[4] = name; row[9] = keyword; row[10] = mid;
+    row[12] = m; row[13] = n; row[14] = o; row[15] = p;
+    return row;
+  }
+
+  // 1~5행은 봇 안내문(더미), 6행이 진짜 헤더(HEADER_ROW=6과 일치), 7행부터 데이터.
+  const bRows = [
+    ['코알라'], [], ['', '', 'mid값 찾는 방법(클릭)'], [], [],
+    realHeader,
+    realRow('리뷰 3개', '111', '마스크', 3, 3, 10, 12),      // 3(9/4) vs 10(9/3, 1일전) → +7 상승
+    realRow('트래픽 1개', '222', '멀티탭', 999, 999, 10, 5)  // 최신(9/4)이 999=상한 → 순위 없음
+  ];
+
+  const bSheet = fakeSheet('펀트미디어 순위추적2', B_GID, bRows);
+  const aSs = fakeSpreadsheet(A_ID, '김승환 현황', []);
+  const bSs = fakeSpreadsheet(B_ID, '펀트미디어 순위추적', [bSheet]);
+  const gs = load({ SpreadsheetApp: fakeSpreadsheetApp({ [A_ID]: aSs, [B_ID]: bSs }) });
+
+  // cfg 는 손대지 않는다 — 배포될 기본값 그대로 검증한다.
+  assertEqual(gs.RANK_ANALYSIS_CONFIG.HEADER_ROW, 6, '기본 HEADER_ROW=6 확인');
+  assertDeep(gs.RANK_ANALYSIS_CONFIG.RANK_CAP_VALUES, [999], '기본 RANK_CAP_VALUES=[999] 확인');
+
+  const out = gs.updateProgramRankingAnalysis();
+  const analysis = aSs.getSheetByName('프로그램별 순위 분석');
+  const detail = aSs.getSheetByName('프로그램별 순위 상세');
+  const flat = analysis.cells.map((r) => r.join('|')).join('\n');
+
+  assertEqual(out.indexOf('기준일: 2026-09-04') >= 0, true,
+              '같은 날짜의 여러 시각 열 중 가장 늦은 16:12 열 기준으로 09-04가 기준일이 된다');
+  assertEqual(flat.indexOf('리뷰') >= 0, true,
+              '"리워드명 / 갯수" 헤더에서 프로그램명이 정상 추출된다');
+
+  const trafficRow1d = detail.cells.filter((r) => r[1] === '222 ｜ 멀티탭' && r[8] === '1일')[0];
+  assertEqual(trafficRow1d[2], '순위 없음',
+              '최신값 999는 상한 취급되어 상세 시트에도 "순위 없음"으로 기록된다');
+  assertEqual(trafficRow1d[5], '누락 또는 종료',
+              '999(상한) 때문에 최신 순위가 없다고 보고 "누락 또는 종료"로 분류한다');
 }
 
 report('순위 분석 · 시트 쓰기');

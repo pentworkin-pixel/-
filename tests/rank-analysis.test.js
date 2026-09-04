@@ -163,8 +163,13 @@ assertDeep(P('리뷰/트래픽'), ['리뷰', '트래픽'], '슬래시 구분자'
   const det = gs.rankAnalysisDetectColumns_(header, [], cfg);
   assertDeep(det.keyCols, [], '식별 열 없음');
   const row = new Array(10).fill('');
-  assertEqual(gs.rankAnalysisBuildItemKey_(row, det, 0, cfg), '행 2',
-              '헤더 1행 다음이므로 첫 데이터 행은 "행 2"');
+
+  // 행 번호 계산 자체는 HEADER_ROW 가 몇이든 "헤더 다음 행부터"라는 규칙만 따른다.
+  const headerAt1 = Object.assign({}, cfg, { HEADER_ROW: 1 });
+  assertEqual(gs.rankAnalysisBuildItemKey_(row, det, 0, headerAt1), '행 2',
+              'HEADER_ROW=1 이면 첫 데이터 행은 "행 2"');
+  assertEqual(gs.rankAnalysisBuildItemKey_(row, det, 0, cfg), '행 ' + (cfg.HEADER_ROW + 1),
+              '실제 기본값(HEADER_ROW=6)이면 첫 데이터 행은 "행 7"');
 }
 
 {
@@ -248,19 +253,22 @@ const REAL_HEADER = ['상품명', '재고', '상품명2', '메모1', '리워드�
   assertEqual(gs.rankAnalysisHeaderTimeScore_('26-09-04 25:99'), -1, '말이 안 되는 시각은 무시');
 }
 
-/* ── 999 같은 상한값을 순위 없음으로 취급할 수 있는지 (기본은 끔) ────────── */
+/* ── 999 같은 상한값을 순위 없음으로 취급 (실제 B시트 안내문 근거로 기본 켬) ── */
 
 {
-  assertEqual(gs.rankAnalysisParseRank_(999, cfg).hasRank, true,
-              '기본 설정(RANK_CAP_VALUES 비어 있음)에서는 999도 그냥 순위로 본다');
-
-  const capped = Object.assign({}, cfg, { RANK_CAP_VALUES: [999] });
-  assertEqual(gs.rankAnalysisParseRank_(999, capped).hasRank, false,
-              'RANK_CAP_VALUES=[999] 로 설정하면 999는 순위 없음으로 처리된다');
-  assertEqual(gs.rankAnalysisParseRank_('999', capped).hasRank, false,
+  // 실제 B시트 4행 안내문("1000위 밖일 경우 확인 불가")과 999가 같은 상품에
+  // 수십 번 연속 반복되는 관측을 근거로, 기본 설정에서 999를 순위 없음으로 본다.
+  assertDeep(cfg.RANK_CAP_VALUES, [999], '기본 설정은 999를 측정 상한으로 본다');
+  assertEqual(gs.rankAnalysisParseRank_(999, cfg).hasRank, false,
+              '기본 설정에서 999는 순위 없음으로 처리된다');
+  assertEqual(gs.rankAnalysisParseRank_('999', cfg).hasRank, false,
               '문자열 "999" 도 동일하게 처리된다');
-  assertEqual(gs.rankAnalysisParseRank_(998, capped).hasRank, true,
+  assertEqual(gs.rankAnalysisParseRank_(998, cfg).hasRank, true,
               '998처럼 상한에 안 걸리는 값은 그대로 순위로 본다');
+
+  const uncapped = Object.assign({}, cfg, { RANK_CAP_VALUES: [] });
+  assertEqual(gs.rankAnalysisParseRank_(999, uncapped).hasRank, true,
+              'RANK_CAP_VALUES를 빈 배열로 바꾸면 999도 정상 순위로 처리된다');
 }
 
 {
