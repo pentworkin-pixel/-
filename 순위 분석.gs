@@ -134,19 +134,27 @@ function rankAnalysisDumpSource() {
                '마지막 행/열: ' + lastRow + '행 / ' + lastCol + '열 (' +
                  rankAnalysisColumnLetter_(lastCol) + '열)'];
 
-  var rowsToShow = Math.min(3, lastRow);
+  // 봇이 만든 시트는 위쪽 몇 행이 안내문/버튼이고 실제 헤더가 그 아래에 있는
+  // 경우가 흔하다. 그래서 넉넉히 10행까지 보되, 빈 칸이 대부분인 열은 줄여서
+  // (값이 있는 열만) 보여준다 — 78열을 매 행 다 찍으면 읽기 어렵기 때문.
+  var rowsToShow = Math.min(10, lastRow);
   if (rowsToShow === 0) {
     lines.push('', '(시트에 데이터가 없습니다)');
   } else {
     var values = sheet.getRange(1, 1, rowsToShow, lastCol).getValues();
     for (var r = 0; r < values.length; r++) {
-      lines.push('', '── ' + (r + 1) + '행 ──');
+      var nonEmpty = [];
       for (var c = 0; c < values[r].length; c++) {
         var raw = values[r][c];
+        if (raw === '' || raw === null || raw === undefined) continue;
         var type = raw instanceof Date ? 'Date' : typeof raw;
-        lines.push('  ' + rankAnalysisColumnLetter_(c + 1) + '열 [' + type + ']: ' +
-                   JSON.stringify(raw instanceof Date ? raw.toISOString() : raw));
+        nonEmpty.push('  ' + rankAnalysisColumnLetter_(c + 1) + '열 [' + type + ']: ' +
+                      JSON.stringify(raw instanceof Date ? raw.toISOString() : raw));
       }
+      lines.push('', '── ' + (r + 1) + '행 (값 있는 열 ' + nonEmpty.length + '/' +
+                 values[r].length + '개) ──');
+      if (nonEmpty.length === 0) lines.push('  (전부 빈 칸)');
+      else Array.prototype.push.apply(lines, nonEmpty);
     }
   }
 
