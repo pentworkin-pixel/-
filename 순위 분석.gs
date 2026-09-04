@@ -114,7 +114,46 @@ function rankAnalysisBuildMenu_(ui) {
   ui.createMenu('순위 분석')
     .addItem('프로그램별 순위 분석 업데이트', 'updateProgramRankingAnalysis')
     .addItem('열 매핑 확인', 'rankAnalysisCheckColumns')
+    .addItem('원본 헤더 그대로 보기 (디버그)', 'rankAnalysisDumpSource')
     .addToUi();
+}
+
+/**
+ * 열 자동 감지를 거치지 않고, 원본 시트의 처음 몇 행을 있는 그대로 찍는다.
+ * rankAnalysisCheckColumns()/updateProgramRankingAnalysis() 가 "필수 열을 찾지
+ * 못했습니다" 오류로 죽을 때, 실제 헤더가 뭐라고 적혀 있는지 보려고 쓰는 함수다.
+ */
+function rankAnalysisDumpSource() {
+  var found = rankAnalysisOpenSourceSheet_();
+  var sheet = found.sheet;
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+
+  var lines = ['=== 원본 헤더 그대로 보기 ===',
+               '원본 시트: ' + found.label,
+               '마지막 행/열: ' + lastRow + '행 / ' + lastCol + '열 (' +
+                 rankAnalysisColumnLetter_(lastCol) + '열)'];
+
+  var rowsToShow = Math.min(3, lastRow);
+  if (rowsToShow === 0) {
+    lines.push('', '(시트에 데이터가 없습니다)');
+  } else {
+    var values = sheet.getRange(1, 1, rowsToShow, lastCol).getValues();
+    for (var r = 0; r < values.length; r++) {
+      lines.push('', '── ' + (r + 1) + '행 ──');
+      for (var c = 0; c < values[r].length; c++) {
+        var raw = values[r][c];
+        var type = raw instanceof Date ? 'Date' : typeof raw;
+        lines.push('  ' + rankAnalysisColumnLetter_(c + 1) + '열 [' + type + ']: ' +
+                   JSON.stringify(raw instanceof Date ? raw.toISOString() : raw));
+      }
+    }
+  }
+
+  var report = lines.join('\n');
+  rankAnalysisLog_(report);
+  rankAnalysisAlert_('원본 헤더 확인', report);
+  return report;
 }
 
 /**
