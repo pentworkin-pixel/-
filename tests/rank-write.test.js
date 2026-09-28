@@ -9,120 +9,12 @@
  */
 'use strict';
 
-const { load, assertEqual, assertDeep, report } = require('./rank-harness');
+const { load, fakeSheet, fakeSpreadsheet, fakeSpreadsheetApp, assertEqual, assertDeep, report } =
+  require('./rank-harness');
 
 const A_ID = '1Sfru4Lfl7cVEXjyZuaqq1qye5UNDghctsSiL6ISeuh8';
 const B_ID = '1bLNh-zrYHHKWgH78ihbgnhpd11ItUhFgw2eT0MromFU';
 const B_GID = 1003701754;
-
-/* ── 가짜 시트 (체이닝 메서드는 Proxy 로 흘려보낸다) ─────────────────────── */
-
-function fakeSheet(name, gid, grid) {
-  const writes = [];
-  const cells = grid.map((r) => r.slice());
-  let filterCreated = 0;
-
-  const sheet = {
-    name, writes, cells,
-    getName: () => name,
-    getSheetId: () => gid,
-    getLastRow: () => cells.length,
-    getLastColumn: () => cells.reduce((m, r) => Math.max(m, r.length), 0),
-    getCharts: () => [],
-    removeChart: () => {},
-    getFilter: () => null,
-    setFrozenRows: () => {},
-    setFrozenColumns: () => {},
-    setConditionalFormatRules: () => {},
-    autoResizeColumns: () => {},
-    clear: () => { cells.length = 0; },
-    insertChart: () => {},
-    newChart: () => chainable({ build: () => ({}) }),
-    get filterCount() { return filterCreated; },
-    getRange(row, col, numRows, numCols) {
-      const nR = numRows === undefined ? 1 : numRows;
-      const nC = numCols === undefined ? 1 : numCols;
-      return chainable({
-        getValues() {
-          const out = [];
-          for (let r = 0; r < nR; r++) {
-            const src = cells[row - 1 + r] || [];
-            const line = [];
-            for (let c = 0; c < nC; c++) {
-              const v = src[col - 1 + c];
-              line.push(v === undefined ? '' : v);
-            }
-            out.push(line);
-          }
-          return out;
-        },
-        setValues(values) {
-          writes.push({ row, col, numRows: nR, numCols: nC });
-          for (let r = 0; r < values.length; r++) {
-            while (cells.length < row + r) cells.push([]);
-            const target = cells[row - 1 + r];
-            for (let c = 0; c < values[r].length; c++) {
-              while (target.length < col - 1 + c) target.push('');
-              target[col - 1 + c] = values[r][c];
-            }
-          }
-          return this;
-        },
-        getFilter: () => null,
-        createFilter: () => { filterCreated++; }
-      });
-    }
-  };
-  return sheet;
-}
-
-/**
- * 정의되지 않은 메서드는 자기 자신을 돌려주어 서식 체이닝(setFontWeight 등)을 흘려보낸다.
- * 테스트가 검증하는 것은 "무엇을 썼는가"이지 서식 호출 하나하나가 아니다.
- */
-function chainable(base) {
-  const proxy = new Proxy(base, {
-    get(target, prop) {
-      if (prop in target) return target[prop];
-      return () => proxy;
-    }
-  });
-  return proxy;
-}
-
-const chain = chainable;
-
-function fakeSpreadsheet(id, name, sheets) {
-  const inserted = [];
-  return {
-    inserted,
-    getId: () => id,
-    getName: () => name,
-    getSheets: () => sheets.slice(),
-    getSheetByName: (n) => sheets.filter((s) => s.getName() === n)[0] || null,
-    insertSheet: (n) => {
-      const s = fakeSheet(n, 900000 + sheets.length, []);
-      sheets.push(s);
-      inserted.push(n);
-      return s;
-    }
-  };
-}
-
-function fakeSpreadsheetApp(byId) {
-  const rule = () => chain({ build: () => ({}) });
-  return {
-    BorderStyle: { SOLID: 'SOLID' },
-    getActiveSpreadsheet: () => null,
-    getUi: () => { throw new Error('no ui'); },
-    openById: (id) => {
-      if (!byId[id]) throw new Error('없는 문서: ' + id);
-      return byId[id];
-    },
-    newConditionalFormatRule: rule,
-    flush: () => {}
-  };
-}
 
 /* ── 데이터 ───────────────────────────────────────────────────────────────
  * 가로형: E(5)=프로그램, G(7)=키워드, H(8)=상품 MID, I~K(9~11)=날짜별 순위

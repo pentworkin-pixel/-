@@ -89,7 +89,12 @@ var RANK_ANALYSIS_CONFIG = {
 
   // ── 출력 ────────────────────────────────────────────────────────────────
   MAX_DETAIL_ROWS: 5000,        // 상세 시트가 지나치게 커지지 않도록 상한
-  DRAW_CHART: true
+  DRAW_CHART: true,
+
+  // ── 자동 실행 ───────────────────────────────────────────────────────────
+  SYNC_FUNCTION: 'updateProgramRankingAnalysis',
+  TRIGGER_HOUR: 11,             // 매일 오전 11시 (B시트 갱신 이후 여유를 두고)
+  TRIGGER_NEAR_MINUTE: 0
 };
 
 /** 프로그램별 요약표의 열 구성. 순서를 바꾸면 표와 서식이 같이 따라간다. */
@@ -120,9 +125,110 @@ function onOpen() {
 function rankAnalysisBuildMenu_(ui) {
   ui.createMenu('순위 분석')
     .addItem('프로그램별 순위 분석 업데이트', 'updateProgramRankingAnalysis')
+    .addSeparator()
+    .addItem('매일 11시 자동 실행 설치', 'rankAnalysisInstall')
+    .addItem('자동 실행 중지', 'rankAnalysisUninstall')
+    .addItem('자동 실행 트리거 확인', 'rankAnalysisVerifyTriggers')
+    .addSeparator()
     .addItem('열 매핑 확인', 'rankAnalysisCheckColumns')
     .addItem('원본 헤더 그대로 보기 (디버그)', 'rankAnalysisDumpSource')
     .addToUi();
+}
+
+/**
+ * 최초 설치. 기존 동기화 트리거를 모두 정리하고 매일 11시(±15분) 트리거를 하나만
+ * 만든 뒤, 실제로 생성됐는지 재조회해 검증하고, 설치 직후 1회 실행한다.
+ * 이후로는 이 함수를 다시 실행할 필요가 없다 — Google 서버가 매일 자동으로 호출한다.
+ */
+function rankAnalysisInstall() {
+  var cfg = RANK_ANALYSIS_CONFIG;
+  var lines = [];
+
+  // 1) 접근 권한부터 확인한다 — 여기서 실패하면 트리거를 만들어도 매일 실패할 뿐이다.
+  var src = rankAnalysisOpenSourceSheet_();
+  lines.push('B시트 읽기 권한: OK (' + src.label + ')');
+  var tgt = rankAnalysisOpenSpreadsheet_(cfg.TARGET_SPREADSHEET_ID, 'A스프레드시트');
+  lines.push('A스프레드시트 쓰기 권한: OK (' + tgt.getName() + ')');
+
+  // 2) 기존 동기화 트리거 전부 삭제 (중복 방지)
+  var removed = rankAnalysisRemoveTriggers_();
+  lines.push('기존 트리거 정리: ' + removed + '개 삭제');
+
+  // 3) 트리거 1개 생성
+  ScriptApp.newTrigger(cfg.SYNC_FUNCTION)
+    .timeBased()
+    .atHour(cfg.TRIGGER_HOUR)
+    .nearMinute(cfg.TRIGGER_NEAR_MINUTE)
+    .everyDays(1)
+    .inTimezone(cfg.TIMEZONE)
+    .create();
+
+  // 4) 생성 검증 — 만들었다고 믿지 않고 다시 조회한다.
+  var mine = rankAnalysisListTriggers_();
+  if (mine.length !== 1) {
+    throw new Error('트리거 생성 검증 실패: 기대 1개, 실제 ' + mine.length + '개');
+  }
+  lines.push('트리거 생성 검증: OK (트리거 ID ' + mine[0].getUniqueId() + ')');
+  lines.push('자동 실행 시각: 매일 오전 ' + cfg.TRIGGER_HOUR + '시 ' +
+             cfg.TRIGGER_NEAR_MINUTE + '분 전후 (' + cfg.TIMEZONE + ', ±15분 변동)');
+
+  // 5) 설치 직후 1회 실행 — 다음 날 11시까지 기다리지 않아도 되도록.
+  var result = rankAnalysisCompute_();
+  rankAnalysisWriteAnalysisSheet_(tgt, result, new Date());
+  rankAnalysisWriteDetailSheet_(tgt, result);
+  SpreadsheetApp.flush();
+  lines.push('');
+  lines.push('── 설치 직후 1회 실행 ──');
+  lines.push(rankAnalysisFormatReport_(result, new Date()));
+
+  var report = '=== 순위 분석 자동 실행 설치 완료 ===\n' + lines.join('\n');
+  rankAnalysisLog_(report);
+  rankAnalysisToast_('순위 분석 설치 완료', '매일 오전 ' + cfg.TRIGGER_HOUR + '시에 자동 실행됩니다.');
+  return report;
+}
+
+/** 자동 실행을 중단한다. 트리거만 삭제하고 이미 만들어진 분석 시트 내용은 그대로 둔다. */
+function rankAnalysisUninstall() {
+  var removed = rankAnalysisRemoveTriggers_();
+  var report = '순위 분석 자동 실행 트리거 ' + removed + '개를 삭제했습니다. ' +
+               '분석 시트의 기존 내용은 그대로 남아 있습니다.';
+  rankAnalysisLog_(report);
+  rankAnalysisToast_('자동 실행 중지됨', report);
+  return report;
+}
+
+/** 등록된 동기화 트리거를 확인한다. */
+function rankAnalysisVerifyTriggers() {
+  var mine = rankAnalysisListTriggers_();
+  var lines = ['등록된 순위 분석 트리거: ' + mine.length + '개'];
+  for (var i = 0; i < mine.length; i++) {
+    lines.push('  ' + (i + 1) + '. ID ' + mine[i].getUniqueId() +
+               ' → ' + mine[i].getHandlerFunction() + '()');
+  }
+  if (mine.length !== 1) {
+    lines.push('⚠️ 트리거가 1개가 아닙니다. rankAnalysisInstall() 을 다시 실행하세요.');
+  }
+  var report = lines.join('\n');
+  rankAnalysisLog_(report);
+  rankAnalysisToast_('트리거 확인', mine.length + '개 등록됨');
+  return report;
+}
+
+/** 이 스크립트가 만든 트리거만 골라낸다. 다른 스크립트(예: 광고 종료 캘린더 동기화)의 트리거는 건드리지 않는다. */
+function rankAnalysisListTriggers_() {
+  var all = ScriptApp.getProjectTriggers();
+  var mine = [];
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].getHandlerFunction() === RANK_ANALYSIS_CONFIG.SYNC_FUNCTION) mine.push(all[i]);
+  }
+  return mine;
+}
+
+/** 이 스크립트가 만든 트리거를 모두 삭제하고 삭제 개수를 반환한다. */
+function rankAnalysisRemoveTriggers_() {
+  var mine = rankAnalysisListTriggers_();
+  for (var i = 0; i < mine.length; i++) ScriptApp.deleteTrigger(mine[i]);
+  return mine.length;
 }
 
 /**
@@ -167,7 +273,7 @@ function rankAnalysisDumpSource() {
 
   var report = lines.join('\n');
   rankAnalysisLog_(report);
-  rankAnalysisAlert_('원본 헤더 확인', report);
+  rankAnalysisToast_('원본 헤더 확인', '실행 로그에서 전체 내용을 확인하세요');
   return report;
 }
 
@@ -183,7 +289,7 @@ function updateProgramRankingAnalysis() {
   try {
     analysis = rankAnalysisCompute_();
   } catch (e) {
-    rankAnalysisAlert_('순위 분석 실패', e.message);
+    rankAnalysisToast_('순위 분석 실패', e.message);
     throw e;
   }
 
@@ -194,7 +300,7 @@ function updateProgramRankingAnalysis() {
 
   var report = rankAnalysisFormatReport_(analysis, started);
   rankAnalysisLog_(report);
-  rankAnalysisAlert_('순위 분석 완료', report);
+  rankAnalysisToast_('순위 분석 완료', '기준일 ' + analysis.baseKey + ' — 실행 로그에서 전체 내용 확인');
   return report;
 }
 
@@ -255,7 +361,7 @@ function rankAnalysisCheckColumns() {
 
   var report = lines.join('\n');
   rankAnalysisLog_(report);
-  rankAnalysisAlert_('열 매핑 확인', report);
+  rankAnalysisToast_('열 매핑 확인', '실행 로그에서 전체 내용을 확인하세요');
   return report;
 }
 
@@ -1250,11 +1356,25 @@ function rankAnalysisColumnLetter_(col) {
   return s;
 }
 
-/** 메뉴에서 실행했을 때만 팝업을 띄운다. 트리거/직접 실행에서는 조용히 넘어간다. */
-function rankAnalysisAlert_(title, message) {
+/**
+ * 실행 결과를 화면 아래에 잠깐 뜨는 알림(토스트)으로 보여준다.
+ *
+ * 예전에는 SpreadsheetApp.getUi().alert() 로 팝업을 띄웠는데, 이 팝업은
+ * 사용자가 "확인"을 누를 때까지 스크립트 실행을 붙든 채로 기다린다 — 그 대기
+ * 시간도 실행 제한 시간(6분)에 그대로 들어가서, 팝업을 늦게 닫으면 "제한시간
+ * 초과"로 죽는 원인이 됐다. 토스트는 화면을 막지 않고 몇 초 후 저절로 사라져서
+ * 이 문제가 없다. 전체 내용은 어차피 Logger/console 에 남아 실행 로그에서 볼 수
+ * 있으므로, 토스트에는 짧은 요약만 띄운다.
+ * 트리거로 자동 실행될 때는 화면(Ui) 자체가 없어 조용히 넘어간다.
+ */
+function rankAnalysisToast_(title, message) {
   try {
-    SpreadsheetApp.getUi().alert(title, message, SpreadsheetApp.getUi().ButtonSet.OK);
-  } catch (e) { /* UI 컨텍스트가 아니면 무시 */ }
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) return;
+    var oneLine = String(message).split('\n')[0];
+    if (oneLine.length > 200) oneLine = oneLine.slice(0, 200) + '…';
+    ss.toast(oneLine, title, 10);
+  } catch (e) { /* UI/트리거 컨텍스트가 아니면 무시 */ }
 }
 
 function rankAnalysisLog_(message) {
