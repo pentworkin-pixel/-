@@ -26,8 +26,8 @@
 
 var RANK_ANALYSIS_CONFIG = {
   // ── 대상 ────────────────────────────────────────────────────────────────
-  // 분석 결과가 기록될 A 스프레드시트
-  TARGET_SPREADSHEET_ID: '1Sfru4Lfl7cVEXjyZuaqq1qye5UNDghctsSiL6ISeuh8',
+  // 분석 결과가 기록될 A 스프레드시트 (기존 문서와 분리된 전용 새 스프레드시트)
+  TARGET_SPREADSHEET_ID: '1iYx7FPSHwyjqTFSlLH0YxmC_gAiZV-FvvrYiLGmcdSE',
   // 순위 원본이 있는 B 스프레드시트. A 안의 시트라면 SOURCE_SPREADSHEET_ID 를 비우고
   // SOURCE_SHEET_NAME 만 채우면 getSheetByName 으로 찾는다.
   SOURCE_SPREADSHEET_ID: '1bLNh-zrYHHKWgH78ihbgnhpd11ItUhFgw2eT0MromFU',

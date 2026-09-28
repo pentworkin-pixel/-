@@ -12,7 +12,7 @@
 const { load, fakeSheet, fakeSpreadsheet, fakeSpreadsheetApp, assertEqual, assertDeep, report } =
   require('./rank-harness');
 
-const A_ID = '1Sfru4Lfl7cVEXjyZuaqq1qye5UNDghctsSiL6ISeuh8';
+const A_ID = '1iYx7FPSHwyjqTFSlLH0YxmC_gAiZV-FvvrYiLGmcdSE';
 const B_ID = '1bLNh-zrYHHKWgH78ihbgnhpd11ItUhFgw2eT0MromFU';
 const B_GID = 1003701754;
 
